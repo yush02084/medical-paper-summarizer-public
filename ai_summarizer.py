@@ -159,29 +159,14 @@ class AISummarizer:
 
         return papers
 
-    def _build_prompt(self, paper: Paper, detailed: bool) -> str:
-        """
-        論文要約プロンプトを構築する
-
-        Args:
-            paper: 論文データ
-            detailed: 詳細要約かどうか
-
-        Returns:
-            プロンプト文字列
-        """
-        # 著者表示（最大5名 + et al.）
+    def _build_paper_info(self, paper: Paper) -> str:
+        """論文基本情報ブロックを構築する"""
         if len(paper.authors) > 5:
             author_str = ", ".join(paper.authors[:5]) + " et al."
         else:
             author_str = ", ".join(paper.authors)
-
-        # 論文タイプ
         pub_type_str = ", ".join(paper.pub_types) if paper.pub_types else "不明"
-
-        # 基本情報
-        paper_info = f"""
-【論文情報】
+        return f"""【論文情報】
 タイトル: {paper.title}
 著者: {author_str}
 ジャーナル: {paper.journal}
@@ -191,13 +176,48 @@ DOI: {paper.doi if paper.doi else "N/A"}
 MeSH用語: {", ".join(paper.mesh_terms[:10]) if paper.mesh_terms else "N/A"}
 
 【アブストラクト】
-{paper.abstract}
-""".strip()
+{paper.abstract}""".strip()
 
-        if detailed:
-            return self._build_detailed_prompt(paper_info)
+    def _detect_paper_type(self, paper: Paper) -> str:
+        """
+        論文タイプを判定する
+
+        Returns:
+            "guideline" / "synthesis" / "review" / "research"
+        """
+        types = set(paper.pub_types)
+        if types & {"Practice Guideline", "Guideline"}:
+            return "guideline"
+        if types & {"Systematic Review", "Meta-Analysis"}:
+            return "synthesis"
+        if types & {"Review"}:
+            return "review"
+        # pub_typesが空またはキーワードでフォールバック
+        text = (paper.title + " " + paper.abstract).lower()
+        if "guideline" in text or "recommendation" in text:
+            return "guideline"
+        if "systematic review" in text or "meta-analysis" in text:
+            return "synthesis"
+        if "review" in text and "randomized" not in text:
+            return "review"
+        return "research"
+
+    def _build_prompt(self, paper: Paper, detailed: bool) -> str:
+        """論文タイプに応じてプロンプトを振り分ける"""
+        paper_type = self._detect_paper_type(paper)
+        logger.info(f"論文タイプ判定: {paper_type} （{paper.title[:40]}...）")
+        if paper_type == "guideline":
+            return self._build_guideline_prompt(paper)
+        elif paper_type == "synthesis":
+            return self._build_synthesis_prompt(paper)
+        elif paper_type == "review":
+            return self._build_review_prompt(paper)
         else:
-            return self._build_brief_prompt(paper_info)
+            paper_info = self._build_paper_info(paper)
+            if detailed:
+                return self._build_detailed_prompt(paper_info)
+            else:
+                return self._build_brief_prompt(paper_info)
 
     def _build_detailed_prompt(self, paper_info: str) -> str:
         """詳細要約プロンプト"""
@@ -301,6 +321,156 @@ MeSH用語: {", ".join(paper.mesh_terms[:10]) if paper.mesh_terms else "N/A"}
 - 誇張表現は避ける
 """
 
+
+    def _build_synthesis_prompt(self, paper: Paper) -> str:
+        """システマティックレビュー・メタアナリシス向けプロンプト"""
+        paper_info = self._build_paper_info(paper)
+        return f"""あなたは循環器内科の専門医であり、優秀な医師アシスタントです。
+以下のシステマティックレビュー/メタアナリシスについて、忙しい循環器内科医が短時間でエビデンスの質と臨床的意義を把握できるよう、日本語で詳細な批判的要約を作成してください。
+
+{paper_info}
+
+以下の形式で出力してください。
+※「承知いたしました」等の前置きは一切含めず、いきなり「## サマリーインデックス情報」から出力してください。
+
+## サマリーインデックス情報
+- **重要度**: ★5段階で表記（例：★★★★☆）
+- **結論**: [40文字以内]で、このレビューが示したこと
+- **実用**: [50文字以内]で、明日の臨床にどう活きるか。重要キーワードは**太字**にすること
+
+## まず一言で
+このレビュー/メタアナリシスが示したことを1〜2文で要約してください。
+
+## レビューの概要
+- **リサーチクエスチョン**: 何を明らかにしようとしたか（PICO形式が望ましい）
+- **採用文献**: 何本の研究を統合したか（対象期間・研究デザイン）
+- **採用基準**: どのような研究が含まれたか
+
+## 主な結果
+- プールされた統計（ハザード比・オッズ比・RR・95%CI・NNT/NNHなど数値を明記）
+- サブグループ解析で重要な結果があれば記載
+
+## エビデンスの質
+- **GRADE評価**: あれば記載（なければ"記載なし"）
+- **異質性**: I²値・τ²など。臨床的に許容範囲か
+- **出版バイアス**: ファネルプロット等の評価があれば
+
+## 限界
+- 含まれる研究自体の質の問題
+- 異質性・一般化可能性の限界
+- 日本人データの有無
+
+## 日本の臨床への実践メモ
+- 明日からの診療で意識すべきこと
+- 現行ガイドラインとの整合性
+- 日本の医療環境での適用可能性
+
+重要度の基準：
+★★★★★：明日の診療方針に直結する、必ず読むべきパラダイムシフト
+★★★★☆：実用性が高く、知っておくべき重要な知見
+★★★☆☆：特定の条件下で役立つ、または興味深い知見
+★★☆☆☆：参考程度
+★☆☆☆☆：現在の業務への直接的な影響は少ない
+
+重要な注意事項:
+- 統計値は正確に記載し、信頼区間を省略しないでください
+- 異質性が高い場合は必ず指摘してください
+- 根拠が弱い場合は弱いと明確に述べてください
+"""
+
+    def _build_review_prompt(self, paper: Paper) -> str:
+        """ナラティブレビュー向けプロンプト"""
+        paper_info = self._build_paper_info(paper)
+        return f"""あなたは循環器内科の専門医であり、優秀な医師アシスタントです。
+以下のレビュー論文について、忙しい循環器内科医が短時間で全体像を把握できるよう、日本語で要約を作成してください。
+
+{paper_info}
+
+以下の形式で出力してください。
+※「承知いたしました」等の前置きは一切含めず、いきなり「## サマリーインデックス情報」から出力してください。
+
+## サマリーインデックス情報
+- **重要度**: ★5段階で表記（例：★★★★☆）
+- **結論**: [40文字以内]で、このレビューが示したこと
+- **実用**: [50文字以内]で、明日の臨床にどう活きるか。重要キーワードは**太字**にすること
+
+## まず一言で
+このレビューが何を扱い、何を伝えようとしているかを1〜2文で要約してください。
+
+## レビューの概要
+- **対象テーマ・範囲**: 何について・どこまでカバーしているか
+- **執筆の目的**: なぜこのレビューが書かれたか
+
+## 主なエビデンスのまとめ
+（3〜5点の箇条書きで、臨床的に重要な知見を記載）
+
+## 現時点での知見のギャップ・今後の課題
+- まだ明らかになっていないこと
+- 今後必要な研究
+
+## 日本の臨床への実践メモ
+- 現場で使える示唆
+- 日本の医療環境での適用可能性
+
+重要度の基準：
+★★★★★：明日の診療方針に直結する、必ず読むべきパラダイムシフト
+★★★★☆：実用性が高く、知っておくべき重要な知見
+★★★☆☆：特定の条件下で役立つ、または興味深い知見
+★★☆☆☆：参考程度
+★☆☆☆☆：現在の業務への直接的な影響は少ない
+
+重要な注意事項:
+- ナラティブレビューは著者の選択バイアスが入りやすいことを念頭に置いてください
+- 誇張表現は避け、エビデンスの強さに応じた表現を使ってください
+"""
+
+    def _build_guideline_prompt(self, paper: Paper) -> str:
+        """ガイドライン向けプロンプト"""
+        paper_info = self._build_paper_info(paper)
+        return f"""あなたは循環器内科の専門医であり、優秀な医師アシスタントです。
+以下のガイドラインについて、忙しい循環器内科医が短時間で要点を把握できるよう、日本語で要約を作成してください。
+
+{paper_info}
+
+以下の形式で出力してください。
+※「承知いたしました」等の前置きは一切含めず、いきなり「## サマリーインデックス情報」から出力してください。
+
+## サマリーインデックス情報
+- **重要度**: ★5段階で表記（例：★★★★☆）
+- **結論**: [40文字以内]で、このガイドラインの最重要メッセージ
+- **実用**: [50文字以内]で、明日の臨床にどう活きるか。重要キーワードは**太字**にすること
+
+## まず一言で
+このガイドラインの対象と最重要メッセージを1〜2文で要約してください。
+
+## ガイドラインの概要
+- **対象疾患・領域**: 何の疾患・状況を対象としているか
+- **発行機関**: 誰が発行したか（ESC/AHA/ACC/JCS等）
+- **対象読者**: 誰に向けたガイドラインか
+
+## 主要推奨事項（3〜5点）
+（各推奨事項について、推奨クラスと根拠レベルを必ず記載）
+- 例: 【Class I / Level A】〇〇患者には△△を推奨する
+
+## 前回版からの主な変更点
+（前回版との比較が明記されていれば記載。なければ「本文中に明記なし」）
+
+## 日本の実臨床での注意点
+- 国内ガイドライン（JCS等）との差異があれば記載
+- 日本未承認薬・保険適用外の推奨があれば明記
+- 日本の医療環境での実装上の課題
+
+重要度の基準：
+★★★★★：明日の診療方針に直結する、必ず読むべきパラダイムシフト
+★★★★☆：実用性が高く、知っておくべき重要な知見
+★★★☆☆：特定の条件下で役立つ、または興味深い知見
+★★☆☆☆：参考程度
+★☆☆☆☆：現在の業務への直接的な影響は少ない
+
+重要な注意事項:
+- アブストラクトに全推奨事項が含まれないことが多いため、記載のない推奨は「アブストラクトに記載なし」と明示してください
+- 推奨クラスと根拠レベルは正確に転記してください
+"""
 
     def generate_selection_reason(self, paper: Paper) -> str:
         """

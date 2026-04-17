@@ -1,0 +1,43 @@
+name: 🔧 Setup - 専門領域を設定する
+
+on:
+  workflow_dispatch:
+    inputs:
+      specialty:
+        description: |
+          あなたの専門領域を日本語で入力してください
+          例: 循環器内科 / 消化器内科 / 神経内科 / 腫瘍内科 / 呼吸器内科
+        required: true
+        type: string
+
+jobs:
+  generate-config:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install google-generativeai pyyaml
+
+      - name: Generate config.yaml
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SPECIALTY: ${{ inputs.specialty }}
+        run: python setup.py
+
+      - name: Commit generated config.yaml
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add config.yaml
+          git commit -m "setup: ${{ inputs.specialty }} 向けにconfig.yamlを自動生成"
+          git push

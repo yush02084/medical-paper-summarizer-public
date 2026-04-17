@@ -27,7 +27,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # Playwrightのブラウザをインストール
           playwright install chromium
 
       - name: Run summarizer
@@ -36,29 +35,21 @@ jobs:
           NCBI_EMAIL: ${{ secrets.NCBI_EMAIL }}
           NCBI_API_KEY: ${{ secrets.NCBI_API_KEY }}
         run: |
-          # 出力ディレクトリの作成と、事前のダミー・テストファイルの削除
           mkdir -p output
           rm -f output/*.docx
-          # 実行ログを残しつつコマンド実行
           python main.py
 
       - name: Find output file
         id: find_file
         run: |
-          # outputディレクトリから今日生成されたWordファイルを見つける
-          echo "Looking for generated Word files..."
-          ls -la output/
           WORD_FILE=$(ls -t output/*.docx 2>/dev/null | head -n 1 || true)
           if [ -z "$WORD_FILE" ] || [ ! -f "$WORD_FILE" ]; then
             echo "本日の新規論文はありませんでした。メール送信をスキップします。"
             echo "file_found=false" >> $GITHUB_OUTPUT
             exit 0
           fi
-          echo "Found file: $WORD_FILE"
           echo "file_path=$WORD_FILE" >> $GITHUB_OUTPUT
-          # ファイル名を抽出
-          FILE_NAME=$(basename "$WORD_FILE")
-          echo "file_name=$FILE_NAME" >> $GITHUB_OUTPUT
+          echo "file_name=$(basename $WORD_FILE)" >> $GITHUB_OUTPUT
           echo "file_found=true" >> $GITHUB_OUTPUT
 
       - name: Send Summary via Email
@@ -68,28 +59,24 @@ jobs:
           server_address: smtp.gmail.com
           server_port: 465
           secure: true
-          # GitHub Secretsから認証情報を読み込む
           username: ${{ secrets.GMAIL_USERNAME }}
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
           subject: 🩺【医学論文レビュー】新着の論文要約をお届けします
-          # 送信先（カンマ区切りで複数指定可能、これもSecretsから読み込む）
           to: ${{ secrets.GMAIL_RECIPIENT }}
           from: "AI論文要約システム"
           body: |
             本日の最新医学論文の要約が完了しました。
             添付のWordファイル（${{ steps.find_file.outputs.file_name }}）をご確認ください。
-            
+
             --
             自動生成: GitHub Actions
           attachments: ${{ steps.find_file.outputs.file_path }}
-          
-      - name: Commit history.json
+
+      - name: Save history
         run: |
-          # history.jsonの更新をリポジトリに保存する（重複取得防止のため）
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add history.json
           git commit -m "chore: Update paper history" || echo "No changes to commit"
-          # Pushする前に最新を取り込んで競合を防ぐ
           git pull --rebase --autostash origin main
           git push
