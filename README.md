@@ -10,6 +10,7 @@
 ---
 
 ## 📬 届くレポートのイメージ
+<img width="372" height="368" alt="Image" src="https://github.com/user-attachments/assets/e6b1d141-6301-4238-a25b-8fc9e3a4eeea" />
 
 毎朝7時にGmailに届くWordファイルの中身：
 
