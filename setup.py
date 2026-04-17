@@ -10,7 +10,8 @@ import sys
 import json
 import yaml
 import re
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 
 PROMPT_TEMPLATE = """
@@ -173,14 +174,14 @@ def generate_specialty_config(specialty: str, api_key: str) -> dict:
     """Gemini APIで専門領域設定を生成する"""
     print(f"専門領域「{specialty}」の設定を生成中...")
 
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(
-        "gemini-2.5-flash",
-        generation_config=genai.GenerationConfig(temperature=0.3)
-    )
+    client = genai.Client(api_key=api_key)
 
     prompt = PROMPT_TEMPLATE.format(specialty=specialty)
-    response = model.generate_content(prompt)
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(temperature=0.3)
+    )
     text = response.text.strip()
 
     # コードブロックを除去
