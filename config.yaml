@@ -91,24 +91,69 @@ exclude_types:
 
 # --- AI要約設定 ---
 ai:
-  # Gemini モデル フォールバックチェーン（順に試行）
+  # Gemini モデル フォールバックチェーン（上から順に試行）
+  # 起動時にAPIのモデル一覧と照合し、廃止済みのモデルは自動で除外する。
+  # 全滅した場合は利用可能な安定版Flash系モデルを自動選択する（ログに警告が出る）。
+  # 無料枠の目安（2026年10月時点）: 3.8/3.6 Flash は1日20回、Flash-Lite は1日500回。
+  # 1回の実行で使うのは「一括判定1回＋要約5回」の約6回。
   model_chain:
-    - "gemini-2.5-flash"
-    - "gemini-2.5-flash-lite-preview-09-2025"
-    - "gemini-2.0-flash"
+    - "gemini-3.8-flash"
+    - "gemini-3.6-flash"
+    - "gemini-3.5-flash-lite"
+    - "gemini-3.1-flash-lite"
   # API呼び出しタイムアウト（秒）
-  timeout: 120
+  timeout: 180
   # リトライ回数
   max_retries: 3
   # リトライ間隔（秒）
   retry_delay: 5
+
+# --- AI一括判定（選定の質の改善） ---
+triage:
+  enabled: true
+  # ルール点数の上位何本をAIで判定するか
+  pool_size: 40
+  # 除外するカテゴリ
+  #   basic   = 動物・細胞・分子機序の研究
+  #   genetic = GWAS・TWAS・オミクス・メンデルランダム化など遺伝疫学
+  #             （メンデルランダム化を残したい場合は genetic を外す）
+  #   other   = 計量書誌学・方法論・医療政策・医学教育など、ヒトの臨床的結論を出さない研究
+  exclude_categories:
+    - basic
+    - genetic
+    - other
+  # AI判定の研究デザインごとの点数（PubMedタグの点数と高い方を採用）
+  design_scores:
+    rct: 10
+    guideline: 10
+    meta_analysis: 9
+    prospective_cohort: 7
+    registry: 6
+    diagnostic: 6
+    retrospective: 5
+    cross_sectional: 4
+    review: 4
+    other: 3
+
+# --- PMCオープンアクセス全文 ---
+fulltext:
+  enabled: true
+  # 要約に渡す本文の最大文字数（約1.5万トークン）
+  max_chars: 60000
+  # これより短い本文は全文扱いしない
+  min_chars: 2000
+
+# --- 警告メールの基準 ---
+alert:
+  # 要約失敗の割合がこれ以上なら件名に⚠を付ける
+  summary_failure_ratio: 0.5
 
 # --- 出力設定 ---
 output:
   # 出力ディレクトリ
   directory: "output"
   # ファイル名フォーマット（日付は自動挿入）
-  filename_format: "週刊医学論文レビュー_{date}.docx"
+  filename_format: "医学論文レビュー_{date}.docx"
 
 # --- 履歴管理 ---
 history:

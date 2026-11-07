@@ -7,7 +7,6 @@ python-docxを使用して、論文要約をWord文書として出力する。
 
 import logging
 import re
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -18,6 +17,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.style import WD_STYLE_TYPE
 
 from pubmed_searcher import Paper
+from timeutil import now_jst
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +33,8 @@ class WordGenerator:
             config: config.yamlから読み込んだ設定辞書
         """
         self.config = config
-        self.specialty_name = config.get("specialty_name", "医学")
         self.output_config = config.get("output", {})
+        self.specialty_name = config.get("specialty_name", "医学")
 
     def generate(
         self,
@@ -55,9 +55,9 @@ class WordGenerator:
         if output_path is None:
             output_dir = Path(self.output_config.get("directory", "output"))
             output_dir.mkdir(exist_ok=True)
-            date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            date_str = now_jst().strftime("%Y%m%d_%H%M%S")
             filename = self.output_config.get(
-                "filename_format", "週刊医学論文レビュー_{date}.docx"
+                "filename_format", "医学論文レビュー_{date}.docx"
             ).replace("{date}", date_str)
             output_path = str(output_dir / filename)
 
@@ -109,12 +109,13 @@ class WordGenerator:
         title.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
         # サブタイトル
-        now = datetime.now()
+        now = now_jst()
+        weekday_ja = "月火水木金土日"[now.weekday()]
         subtitle = doc.add_paragraph()
         subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
         run = subtitle.add_run(
             f"{self.specialty_name} 新着論文サマリー\n"
-            f"作成日: {now.strftime('%Y年%m月%d日')}（{now.strftime('%A')}）"
+            f"作成日: {now.strftime('%Y年%m月%d日')}（{weekday_ja}）"
         )
         run.font.size = Pt(12)
         run.font.color.rgb = RGBColor(100, 100, 100)
@@ -126,7 +127,8 @@ class WordGenerator:
         overview = doc.add_paragraph()
         overview.add_run(
             f"今週の注目論文トップ{len(papers)}を選出しました。\n"
-            f"冒頭にサマリーインデックスを掲載し、全{len(papers)}本を詳細に解説します。"
+            f"冒頭にサマリーインデックスを掲載し、全{len(papers)}本を解説します。\n"
+            f"各論文の末尾に、要約の元にした資料（全文／抄録のみ）と数値照合の結果を記載しています。"
         ).font.size = Pt(10)
 
     def _add_papers(self, doc: Document, papers: list[Paper]):
@@ -136,13 +138,15 @@ class WordGenerator:
         for i, paper in enumerate(papers):
             is_detailed = (i < detailed_n)
 
-            # AI要約から重要度を抽出
+            # AI要約から重要度・和訳タイトルを抽出
             index_info = self._extract_index_info(paper)
             importance = index_info.get("importance", "")
+            title_ja = index_info.get("title_ja", "")
 
             # セクション見出し
             doc.add_heading(
-                f"#{paper.priority_rank} 【{importance}】 {paper.title}",
+                f"#{paper.priority_rank} 【{importance}】 "
+                f"{self._display_title(paper, title_ja)}",
                 level=1
             )
 
@@ -161,12 +165,43 @@ class WordGenerator:
             if paper.summary and paper.summary.get("content"):
                 content = paper.summary["content"]
                 self._add_markdown_content(doc, content)
+                self._add_verification_note(doc, paper)
             else:
                 doc.add_paragraph("要約は生成されませんでした。")
 
             # 区切り
             if i < len(papers) - 1:
                 doc.add_paragraph("─" * 50)
+
+    def _add_verification_note(self, doc: Document, paper: Paper):
+        """要約の元資料と数値照合の結果を表示する"""
+        summary = paper.summary or {}
+        if summary.get("failed"):
+            return
+        para = doc.add_paragraph()
+        source = summary.get("source", "抄録のみ")
+        run = para.add_run(f"要約の元: {source}")
+        run.font.size = Pt(9)
+        run.font.color.rgb = RGBColor(100, 100, 100)
+
+        check = summary.get("number_check")
+        if not check:
+            return
+        para2 = doc.add_paragraph()
+        if check["unverified"]:
+            run2 = para2.add_run(
+                "⚠ 要確認: 原文に見つからなかった数値 → "
+                + ", ".join(check["unverified"])
+                + "（AIの計算値・書き換え・誤りの可能性。原著で確認してください）"
+            )
+            run2.font.bold = True
+            run2.font.color.rgb = RGBColor(192, 0, 0)
+        elif check["total"] == 0:
+            run2 = para2.add_run("数値照合: 照合対象の数値なし")
+        else:
+            run2 = para2.add_run(f"✓ 数値照合: 要約中の数値{check['total']}件はすべて原文と一致")
+            run2.font.color.rgb = RGBColor(0, 128, 0)
+        run2.font.size = Pt(9)
 
     def _add_paper_info_table(self, doc: Document, paper: Paper):
         """論文基本情報テーブルを追加する"""
@@ -254,6 +289,8 @@ class WordGenerator:
         """
         太字（**text**）を含むテキストをWord段落に追加する
         """
+        import re
+
         # **text** パターンを分割
         parts = re.split(r'(\*\*.*?\*\*)', text)
 
@@ -298,8 +335,10 @@ class WordGenerator:
                 priority = f"#{paper.priority_rank}"
             table.cell(row_idx, 0).text = priority
 
-            # 論文タイトル（短縮）
-            title = paper.title[:60] + "..." if len(paper.title) > 60 else paper.title
+            # 論文タイトル（和訳併記・短縮）
+            title_ja = self._extract_index_info(paper).get("title_ja", "")
+            display_title = self._display_title(paper, title_ja)
+            title = display_title[:60] + "..." if len(display_title) > 60 else display_title
             table.cell(row_idx, 1).text = title
 
             # ジャーナル / デザイン
@@ -386,13 +425,21 @@ class WordGenerator:
             importance = info.get("importance", "★★★☆☆")
             conclusion = info.get("conclusion", "要約参照")
             practical = info.get("practical", "要約参照")
+            title_ja = info.get("title_ja", "")
 
             # [番号]. 【★重要度】タイトル
             p_title = doc.add_paragraph()
             p_title.paragraph_format.space_before = Pt(10)
-            run_title = p_title.add_run(f"{i}. 【{importance}】 {paper.title}")
+            run_title = p_title.add_run(
+                f"{i}. 【{importance}】 {self._display_title(paper, title_ja)}"
+            )
             run_title.font.bold = True
             run_title.font.size = Pt(11)
+            check = (paper.summary or {}).get("number_check") or {}
+            if check.get("unverified"):
+                warn = p_title.add_run(f"  ⚠数値要確認{len(check['unverified'])}件")
+                warn.font.size = Pt(9)
+                warn.font.color.rgb = RGBColor(192, 0, 0)
 
             # ・結論：...
             p_conc = doc.add_paragraph(style="List Bullet")
@@ -409,18 +456,30 @@ class WordGenerator:
     def _extract_index_info(self, paper: Paper) -> dict:
         """AI要約からインデックス用情報を抽出する"""
         content = paper.summary.get("content", "")
+        import re
+        
         info = {
+            "title_ja": "",
             "importance": "★★★☆☆",
             "conclusion": "要約参照",
             "practical": "要約参照"
         }
-        
+
         # サマリーインデックス情報セクションを探す
         # セクション見出しの揺らぎ（## や ###、前後のスペース等）を許容
         section_match = re.search(r"(?:##+|[*]{2})\s*サマリーインデックス情報.*?\n(.*?)(?=\n#|$)", content, re.DOTALL | re.IGNORECASE)
-        
+
         section_content = section_match.group(1) if section_match else content
-            
+
+        # タイトル和訳抽出: タイトル和訳から重要度（またはセクション末尾）までを取得
+        title_match = re.search(r"タイトル和訳(.*?)(?:重要度|$)", section_content, re.DOTALL)
+        if title_match:
+            val = title_match.group(1)
+            val = re.sub(r"^[:：\s\*・-]*", "", val)
+            val = re.sub(r"[\s\*・\-\d\.]*$", "", val)
+            if val:
+                info["title_ja"] = val
+
         # 重要度抽出
         imp_match = re.search(r"重要度.*?([★☆]+)", section_content)
         if imp_match:
@@ -446,6 +505,12 @@ class WordGenerator:
                 info["practical"] = val
                 
         return info
+
+    def _display_title(self, paper: Paper, title_ja: str) -> str:
+        """和訳タイトルと原題を併記した表示用タイトルを組み立てる"""
+        if title_ja:
+            return f"{title_ja}（{paper.title}）"
+        return paper.title
 
     def _add_references(self, doc: Document, papers: list[Paper]):
         """参考文献リストを追加する"""

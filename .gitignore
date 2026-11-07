@@ -3,3 +3,5 @@ __pycache__/
 output/*.docx
 paper_collector.log
 .env
+run_status.json
+config.yaml.bak

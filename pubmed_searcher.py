@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 
 from Bio import Entrez
 
+from timeutil import now_jst
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,6 +34,11 @@ class Paper:
     # フィルタリング後に付与
     priority_score: float = 0.0
     priority_rank: int = 0
+    # PMC（オープンアクセス全文）
+    pmcid: str = ""
+    full_text: str = ""
+    # AI一括判定の結果（design / category / japan_asian / reason など）
+    triage: dict = field(default_factory=dict)
     # AI要約結果
     summary: dict = field(default_factory=dict)
 
@@ -224,7 +231,7 @@ class PubMedSearcher:
         query = self._build_query(days_back)
 
         # ESearch: PMIDリスト取得　※日付はmindate/maxdateパラメータで指定
-        end_date = datetime.now()
+        end_date = now_jst()
         start_date = end_date - timedelta(days=days_back)
         min_date_str = start_date.strftime("%Y/%m/%d")
         max_date_str = end_date.strftime("%Y/%m/%d")
@@ -334,14 +341,15 @@ class PubMedSearcher:
                     doi = str(aid)
                     break
 
-            # PubmedDataからもDOI取得を試みる
-            if not doi:
-                pubmed_data = article.get("PubmedData", {})
-                article_id_list = pubmed_data.get("ArticleIdList", [])
-                for aid in article_id_list:
-                    if aid.attributes.get("IdType", "") == "doi":
-                        doi = str(aid)
-                        break
+            # PubmedDataからDOI（未取得時）とPMCIDを取得する
+            pmcid = ""
+            pubmed_data = article.get("PubmedData", {})
+            for aid in pubmed_data.get("ArticleIdList", []):
+                id_type = aid.attributes.get("IdType", "")
+                if id_type == "doi" and not doi:
+                    doi = str(aid)
+                elif id_type == "pmc":
+                    pmcid = str(aid)
 
             # MeSH用語
             mesh_terms = []
@@ -368,7 +376,8 @@ class PubMedSearcher:
                 pub_types=pub_types,
                 doi=doi,
                 mesh_terms=mesh_terms,
-                keywords=keywords
+                keywords=keywords,
+                pmcid=pmcid,
             )
 
         except Exception as e:
