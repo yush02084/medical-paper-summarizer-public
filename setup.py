@@ -10,8 +10,7 @@ import sys
 import json
 import yaml
 import re
-from google import genai
-from google.genai import types
+from llm_client import GeminiClient
 
 
 PROMPT_TEMPLATE = """
@@ -170,15 +169,33 @@ BASE_CONFIG = {
         "zebrafish"
     ],
     "ai": {
+        # 起動時にAPIのモデル一覧と照合し、廃止済みモデルは自動で除外される
         "model_chain": [
-            "gemini-2.5-flash",
-            "gemini-2.5-flash-lite-preview-09-2025",
-            "gemini-2.0-flash"
+            "gemini-3.8-flash",
+            "gemini-3.6-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-3.1-flash-lite"
         ],
-        "timeout": 120,
+        "timeout": 180,
         "max_retries": 3,
         "retry_delay": 5
     },
+    # AI一括判定（臨床研究以外を除外し、研究デザインを判定する）
+    "triage": {
+        "enabled": True,
+        "pool_size": 40,
+        # basic=基礎研究 / genetic=GWAS等の遺伝疫学 / other=計量書誌学・方法論・医療政策など
+        "exclude_categories": ["basic", "genetic", "other"],
+        "design_scores": {
+            "rct": 10, "guideline": 10, "meta_analysis": 9, "prospective_cohort": 7,
+            "registry": 6, "diagnostic": 6, "retrospective": 5, "cross_sectional": 4,
+            "review": 4, "other": 3
+        }
+    },
+    # PMCオープンアクセス全文を要約に使う
+    "fulltext": {"enabled": True, "max_chars": 60000, "min_chars": 2000},
+    # 要約失敗の割合がこれ以上ならメール件名に⚠を付ける
+    "alert": {"summary_failure_ratio": 0.5},
     "output": {
         "directory": "output",
         "filename_format": "医学論文レビュー_{date}.docx"
@@ -194,17 +211,16 @@ def generate_specialty_config(specialty: str, api_key: str) -> dict:
     """Gemini APIで専門領域設定を生成する"""
     print(f"専門領域「{specialty}」の設定を生成中...")
 
-    client = genai.Client(api_key=api_key)
+    # 本体と同じフォールバックチェーンを使う（廃止モデルは自動除外）
+    client = GeminiClient({"ai": BASE_CONFIG["ai"]}, api_key)
 
     daily_theme_preferences = os.environ.get("DAILY_THEME_PREFERENCES", "").strip()
     pref_text = daily_theme_preferences if daily_theme_preferences else "（希望なし。AIが自動で決める）"
     prompt = PROMPT_TEMPLATE.format(specialty=specialty, daily_theme_preferences=pref_text)
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(temperature=0.3)
-    )
-    text = response.text.strip()
+    text = client.generate(prompt, temperature=0.3, max_output_tokens=8192)
+    if not text:
+        raise ValueError("全モデルで生成に失敗しました。時間をおいて再実行してください。")
+    text = text.strip()
 
     # JSONオブジェクトを抽出（前置き文やコードブロックを無視）
     match = re.search(r'\{.*\}', text, re.DOTALL)
@@ -246,9 +262,10 @@ def build_config(specialty: str, generated: dict, include_basic_science: bool) -
         config["clinical_relevance"]["practical"] = gen_cr["practical"]
     # japan_relevantは汎用なのでそのまま維持
 
-    # 基礎研究を含める場合は除外リストを空にする
+    # 基礎研究を含める場合はキーワード除外を空にし、AI判定でも基礎研究・遺伝疫学を残す
     if include_basic_science:
         config["basic_science_exclude"] = []
+        config["triage"]["exclude_categories"] = ["other"]
 
     return config
 

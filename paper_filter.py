@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from pubmed_searcher import Paper
+from timeutil import now_jst
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,7 @@ class PaperFilter:
         Args:
             papers: 報告対象の論文リスト
         """
-        now = datetime.now().isoformat()
+        now = now_jst().isoformat()
         for paper in papers:
             self.history["reported_pmids"][paper.pmid] = {
                 "title": paper.title,
@@ -66,7 +67,7 @@ class PaperFilter:
         retention_days = self.config.get("history", {}).get(
             "retention_days", 180
         )
-        cutoff = datetime.now() - timedelta(days=retention_days)
+        cutoff = now_jst() - timedelta(days=retention_days)
 
         cleaned = {}
         for pmid, info in self.history["reported_pmids"].items():
@@ -86,60 +87,67 @@ class PaperFilter:
 
         logger.info(f"履歴を保存しました（{len(cleaned)}件）")
 
-    def filter_and_rank(self, papers: list[Paper]) -> list[Paper]:
+    def filter_and_rank(self, papers: list[Paper], triage=None) -> list[Paper]:
         """
         論文をフィルタリングし、優先度順にランク付けする
 
         Args:
             papers: PubMed検索結果の論文リスト
+            triage: PaperTriage（Noneまたは無効ならルール点数のみ）
 
         Returns:
             優先度順にソートされた上位N件の論文リスト
         """
         top_n = self.config.get("search", {}).get("top_n", 10)
+        self.triage_ok = None  # None=未実施, True=成功, False=失敗
 
         # 1. 重複排除（過去に報告済みの論文を除外）
         new_papers = self._remove_duplicates(papers)
-        logger.info(
-            f"重複排除: {len(papers)}件 → {len(new_papers)}件"
-        )
+        logger.info(f"重複排除: {len(papers)}件 → {len(new_papers)}件")
 
         # 2. 除外対象の論文タイプを除外
         filtered = self._exclude_types(new_papers)
-        logger.info(
-            f"タイプ除外: {len(new_papers)}件 → {len(filtered)}件"
-        )
+        logger.info(f"タイプ除外: {len(new_papers)}件 → {len(filtered)}件")
 
         # 3. アブストラクトなしの論文を除外
         filtered = [p for p in filtered if p.abstract.strip()]
         logger.info(f"アブストラクト有り: {len(filtered)}件")
 
-        # 3.5. 基礎研究を除外
+        # 3.5. 基礎研究を除外（キーワードによる一次除外）
         filtered = self._exclude_basic_science(filtered)
         logger.info(f"基礎研究除外後: {len(filtered)}件")
 
-        # 4. 優先度スコアを計算
+        # 4. ルール点数で一次ランク付け
         for paper in filtered:
             paper.priority_score = self._calculate_score(paper)
-
-        # 5. スコア順にソート
         filtered.sort(key=lambda p: p.priority_score, reverse=True)
+
+        # 5. 上位候補をAIで一括判定 → 基礎研究の除外とデザイン点の補正
+        if triage is not None and triage.enabled and filtered:
+            pool_size = self.config.get("triage", {}).get("pool_size", 40)
+            pool = filtered[:pool_size]
+            self.triage_ok = triage.triage(pool)
+
+            exclude_cats = set(
+                self.config.get("triage", {}).get("exclude_categories", ["basic", "genetic", "other"])
+            )
+            before = len(pool)
+            pool = [p for p in pool if p.triage.get("category") not in exclude_cats]
+            logger.info(
+                f"AI判定で除外（{', '.join(sorted(exclude_cats))}）: {before}件 → {len(pool)}件"
+            )
+
+            for paper in pool:
+                paper.priority_score = self._calculate_score(paper)
+            pool.sort(key=lambda p: p.priority_score, reverse=True)
+            filtered = pool
 
         # 6. 上位N件を選出
         top_papers = filtered[:top_n]
         for rank, paper in enumerate(top_papers, 1):
             paper.priority_rank = rank
 
-        logger.info(
-            f"上位 {len(top_papers)} 件を選出しました"
-        )
-        for paper in top_papers:
-            logger.debug(
-                f"  #{paper.priority_rank} "
-                f"[{paper.priority_score:.1f}] "
-                f"{paper.title[:60]}..."
-            )
-
+        logger.info(f"上位 {len(top_papers)} 件を選出しました")
         return top_papers
 
     def _remove_duplicates(self, papers: list[Paper]) -> list[Paper]:
@@ -201,12 +209,22 @@ class PaperFilter:
         return score
 
     def _score_study_type(self, paper: Paper) -> float:
-        """論文タイプに基づくスコア"""
+        """
+        論文タイプに基づくスコア
+
+        PubMedのタグとAI判定のデザインの高い方を採用する
+        （新着論文はPubMedのタグが未付与で「Journal Article」だけのことが多いため）
+        """
         type_scores = self.config.get("study_type_scores", {})
         max_score = 0.0
         for pt in paper.pub_types:
             s = type_scores.get(pt, 3)  # デフォルト3点
             max_score = max(max_score, s)
+
+        design = (paper.triage or {}).get("design")
+        if design:
+            design_scores = self.config.get("triage", {}).get("design_scores", {})
+            max_score = max(max_score, design_scores.get(design, 3))
         return max_score
 
     def _score_journal(self, paper: Paper) -> float:
@@ -277,7 +295,8 @@ class PaperFilter:
             score += 5.0
         if any(kw.lower() in text for kw in cr.get("practical", [])):
             score += 3.0
-        if any(kw.lower() in text for kw in cr.get("japan_relevant", [])):
+        japan_kw = any(kw.lower() in text for kw in cr.get("japan_relevant", []))
+        if japan_kw or (paper.triage or {}).get("japan_asian"):
             score += 2.0
 
         return min(score, 10.0)
@@ -289,7 +308,7 @@ class PaperFilter:
 
         try:
             pub = datetime.strptime(paper.pub_date, "%Y/%m/%d")
-            days_ago = (datetime.now() - pub).days
+            days_ago = (now_jst() - pub).days
 
             if days_ago <= 3:
                 return 3.0

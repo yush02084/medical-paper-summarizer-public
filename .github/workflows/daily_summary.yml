@@ -2,8 +2,9 @@ name: Daily Paper Summary and Email
 
 on:
   schedule:
-    # 毎日UTC時間の22:00（日本時間の翌朝07:00）に実行
-    - cron: '0 22 * * *'
+    # 毎日UTC 20:00（日本時間 05:00）に予約。
+    # GitHubの混雑で起動が数時間遅れることがあるため、朝に届くよう早めに設定している。
+    - cron: '0 20 * * *'
   workflow_dispatch:
     # 手動実行用トリガー
 
@@ -13,19 +14,18 @@ concurrency:
 
 jobs:
   run-summary:
-    runs-on: ubuntu-latest
+    # ubuntu-latest は Ubuntu 26 へ移行中のため、動作確認済みの 24.04 に固定
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: write
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -67,6 +67,34 @@ jobs:
           rm -f output/*.docx
           python main.py
 
+      - name: Read run status
+        id: status
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os
+          try:
+              st = json.load(open("run_status.json", encoding="utf-8"))
+          except Exception:
+              st = {"warnings": ["実行状況ファイルなし（途中で停止した可能性）"]}
+          warnings = st.get("warnings", [])
+          prefix = "⚠【要確認】" if warnings else ""
+          lines = []
+          if "summaries_total" in st:
+              lines.append(f"要約: {st['summaries_total'] - st.get('summaries_failed', 0)}/{st['summaries_total']}件成功")
+          if "fulltext" in st:
+              lines.append(f"PMC全文で要約: {st['fulltext']}件（残りは抄録のみ）")
+          if "unverified_numbers" in st:
+              lines.append(f"原文に見つからなかった数値: {st['unverified_numbers']}件（Word内に⚠表示）")
+          if st.get("models_used"):
+              lines.append("使用モデル: " + ", ".join(f"{k}×{v}" for k, v in st["models_used"].items()))
+          for w in warnings:
+              lines.append("⚠ " + w)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write(f"subject_prefix={prefix}\n")
+              f.write("report<<EOF_REPORT\n" + "\n".join(lines) + "\nEOF_REPORT\n")
+          PY
+
       - name: Find output file
         id: find_file
         run: |
@@ -82,19 +110,23 @@ jobs:
 
       - name: Send Summary via Email
         if: steps.find_file.outputs.file_found == 'true'
-        uses: dawidd6/action-send-mail@v3
+        uses: dawidd6/action-send-mail@v24
         with:
           server_address: smtp.gmail.com
           server_port: 465
           secure: true
           username: ${{ secrets.GMAIL_USERNAME }}
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
-          subject: 🩺【医学論文レビュー】新着の論文要約をお届けします
+          subject: ${{ steps.status.outputs.subject_prefix }}🩺【医学論文レビュー】新着の論文要約をお届けします
           to: ${{ secrets.GMAIL_RECIPIENT }}
-          from: "AI論文要約システム"
+          # v24では表示名だけの from が拒否されるため「表示名 <アドレス>」の形式で指定する
+          from: "AI論文要約システム <${{ secrets.GMAIL_USERNAME }}>"
           body: |
             本日の最新医学論文の要約が完了しました。
             添付のWordファイル（${{ steps.find_file.outputs.file_name }}）をご確認ください。
+
+            【実行状況】
+            ${{ steps.status.outputs.report }}
 
             --
             自動生成: GitHub Actions
